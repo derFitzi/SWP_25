@@ -51,14 +51,14 @@ def two_pair(farben, werte):
     return False
 
 def triplett(farben, werte):
-    werte.sort()
+    werte=simple_sort(werte)
     if (len(set(werte))<=len(werte)-2):
         if (werte[0] == werte[1] == werte[2]) or (werte[2] == werte[3] == werte[4]) or (werte[1]==werte[2]==werte[3]):
             return True
     return False
 
 def straight(farben, werte):
-    werte.sort()
+    werte=simple_sort(werte)
     #print(werte)
     for i in range(0,len(werte)-1):
         if werte[i] != werte[i+1]-1:
@@ -72,20 +72,20 @@ def flush(farben, werte):
 
 def full_house (farben, werte):
     if len(set(werte)) <= len(werte) - 3:
-        werte.sort()
+        werte=simple_sort(werte)
         if werte[0] == werte[1] and werte[len(werte) - 1]== werte[len(werte) - 2]:
             return True
     return False
 
 def quattet(farben, werte):
     if len(set(werte))<=len(werte)-3:
-        werte.sort()
+        werte=simple_sort(werte)
         if (werte[0]==werte[1]==werte[2]==werte[3]) or (werte[1]==werte[2]==werte[3]==werte[4]):
             return True
     return False
 
 def straight_flush(farben, werte):
-    werte.sort()
+    werte=simple_sort(werte)
     # print(werte)
     for i in range(0, len(werte) - 1):
         if werte[i] != werte[i + 1] - 1:
@@ -96,7 +96,7 @@ def straight_flush(farben, werte):
         return False
 
 def royal_flush(farben, werte):
-    werte.sort()
+    werte=simple_sort(werte)
     if (len(set(farben))==1):
         if (werte[0] ==0 and werte[1]==9 and werte[2]==10 and werte[3]==11 and werte[4]==12):
             return True
@@ -119,10 +119,24 @@ def prozentual_ausrechnen(anzahl):
         absolute_zahlen[i]=absolute_zahlen[i]/anzahl*100
     return absolute_zahlen
 
+def simple_sort(array):
+    for i in range(len(array)-1):
+        #print(array)
+        if array[i]>array[i+1]:
+            #print(array)
+            temp_gr=array[i]
+            array[i]=array[i+1]
+            array[i+1]=temp_gr
+            simple_sort(array)
+    return array
+
+
+
 def main():
     #print(kombination([9,10,11,12,0]))
     print(prozentual_ausrechnen(1000000))
     #print(karten_ziehen(6))
+    #print(simple_sort([11, 9, 10, 12, 0]))
 
 
 
