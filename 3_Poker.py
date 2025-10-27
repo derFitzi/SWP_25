@@ -99,6 +99,10 @@ def royal_flush(farben, werte):
     werte=simple_sort(werte)
     if (len(set(farben))==1):
         if (werte[0] ==0 and werte[1]==9 and werte[2]==10 and werte[3]==11 and werte[4]==12):
+            # 10, bub, dame, könig, ass
+            return True
+        if (werte[0] ==0 and werte[1]==1 and werte[2]==2 and werte[3]==3 and werte[4]==4):
+            # Ass, 2, 3, 4, 5
             return True
     return False
 
@@ -114,7 +118,7 @@ def absolute_zahlen_berechnen(anzahl):
 
 def prozentual_ausrechnen(anzahl):
     absolute_zahlen = absolute_zahlen_berechnen(anzahl)
-    print(absolute_zahlen)
+    print("Absolute Ergebnisse: ",absolute_zahlen)
     for i in range(len(absolute_zahlen)):
         absolute_zahlen[i]=absolute_zahlen[i]/anzahl*100
     return absolute_zahlen
@@ -130,13 +134,22 @@ def simple_sort(array):
             simple_sort(array)
     return array
 
+def fehler_berechnen(prozentuale_auswertung, rechenwerte):
+    for i in range(len(prozentuale_auswertung)):
+        prozentuale_auswertung[i]=(prozentuale_auswertung[i]/rechenwerte[i]*100)-100
+    return prozentuale_auswertung
+
 
 
 def main():
+    richtige_werte={0:50.13, 1:42.25,2:4.75,3:2.11,4:0.39,5:0.20,6:0.14,7:0.02,8:0.00135, 9:0.00015 }
     #print(kombination([9,10,11,12,0]))
-    print(prozentual_ausrechnen(1000000))
+    #print(prozentual_ausrechnen(1000000))
     #print(karten_ziehen(6))
     #print(simple_sort([11, 9, 10, 12, 0]))
+    prozente = prozentual_ausrechnen(10000000)
+    print("Prozentuale Ergebnisse: ",prozente)
+    print("Prozentuale Abweichungen: ",fehler_berechnen(prozente,richtige_werte))
 
 
 
