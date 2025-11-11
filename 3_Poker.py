@@ -147,7 +147,7 @@ def main():
     #print(prozentual_ausrechnen(1000000))
     #print(karten_ziehen(6))
     #print(simple_sort([11, 9, 10, 12, 0]))
-    prozente = prozentual_ausrechnen(10000000)
+    prozente = prozentual_ausrechnen(1000000)
     print("Prozentuale Ergebnisse: ",prozente)
     print("Prozentuale Abweichungen: ",fehler_berechnen(prozente,richtige_werte))
 
