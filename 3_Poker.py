@@ -58,12 +58,17 @@ def triplett(farben, werte):
     return False
 
 def straight(farben, werte):
-    werte=simple_sort(werte)
-    #print(werte)
-    for i in range(0,len(werte)-1):
-        if werte[i] != werte[i+1]-1:
-            return False
-    return True
+    werte = sorted(set(werte))
+    if len(werte) != 5:
+        return False
+    if werte[-1] - werte[0] == 4:
+        return True
+    if set(werte) == {0, 1, 2, 3, 4}:
+        return True
+    if set(werte) == {0, 9, 10, 11, 12}:
+        return True
+    return False
+
 
 def flush(farben, werte):
     if (len(set(farben))==1):
@@ -85,26 +90,11 @@ def quattet(farben, werte):
     return False
 
 def straight_flush(farben, werte):
-    werte=simple_sort(werte)
-    # print(werte)
-    for i in range(0, len(werte) - 1):
-        if werte[i] != werte[i + 1] - 1:
-            return False
-    if (len(set(farben))==1):
-        return True
-    else:
-        return False
+    return flush(farben, werte) and straight(farben, werte)
 
 def royal_flush(farben, werte):
-    werte=simple_sort(werte)
-    if (len(set(farben))==1):
-        if (werte[0] ==0 and werte[1]==9 and werte[2]==10 and werte[3]==11 and werte[4]==12):
-            # 10, bub, dame, könig, ass
-            return True
-        if (werte[0] ==0 and werte[1]==1 and werte[2]==2 and werte[3]==3 and werte[4]==4):
-            # Ass, 2, 3, 4, 5
-            return True
-    return False
+    return flush(farben, werte) and set(werte) == {0,9,10,11,12}
+
 
 def absolute_zahlen_berechnen(anzahl):
     ergebnis={}
