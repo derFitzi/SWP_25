@@ -83,11 +83,13 @@ def full_house (farben, werte):
     return False
 
 def quattet(farben, werte):
-    if len(set(werte))<=len(werte)-3:
-        werte=simple_sort(werte)
-        if (werte[0]==werte[1]==werte[2]==werte[3]) or (werte[1]==werte[2]==werte[3]==werte[4]):
-            return True
+    werte = sorted(werte)
+    if werte[0] == werte[1] == werte[2] == werte[3]:
+        return True
+    if werte[1] == werte[2] == werte[3] == werte[4]:
+        return True
     return False
+
 
 def straight_flush(farben, werte):
     return flush(farben, werte) and straight(farben, werte)
@@ -132,7 +134,7 @@ def fehler_berechnen(prozentuale_auswertung, rechenwerte):
 
 
 def main():
-    richtige_werte={0:50.13, 1:42.25,2:4.75,3:2.11,4:0.39,5:0.20,6:0.14,7:0.02,8:0.00135, 9:0.00015 }
+    richtige_werte={0:50.1177, 1:42.2569,2:4.7539,3:2.1128,4:0.3925,5:0.1965,6:0.1441,7:0.024,8:0.00139, 9:0.000154 }
     #print(kombination([9,10,11,12,0]))
     #print(prozentual_ausrechnen(1000000))
     #print(karten_ziehen(6))
