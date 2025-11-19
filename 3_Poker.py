@@ -38,17 +38,24 @@ def kombination(karten):
         return 1
     else:
         return 0
-
+"""
+#Ursprüngliche Funktion
 def pair(farben, werte):
     if (len(set(werte))<len(werte)):
         return True
     return False
-
+"""
+def pair(farben, werte):
+    return (False, True)[len(set(werte))<len(werte)] # ternärer Operator mit tuple für Übung
+"""
+#Ursprüngliche Funktion
 def two_pair(farben, werte):
     if (len(set(werte))<=len(werte)-2):
-
         return True
     return False
+"""
+def two_pair(farben, werte):
+    return {True: 1, False: 0}[len(set(werte))<=len(werte)-2] # ternärer Operator mit dict für Übung
 
 def triplett(farben, werte):
     werte=simple_sort(werte)
