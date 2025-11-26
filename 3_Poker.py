@@ -1,4 +1,5 @@
 import random
+import unittest
 def karten_ziehen(anzahl):
     auswertung=[]
     # geht alles schneller mit return random.sample(range(1, 53), anzahl)
@@ -47,6 +48,7 @@ def pair(farben, werte):
 """
 def pair(farben, werte):
     return (False, True)[len(set(werte))<len(werte)] # ternärer Operator mit tuple für Übung
+
 """
 #Ursprüngliche Funktion
 def two_pair(farben, werte):
@@ -140,6 +142,7 @@ def fehler_berechnen(prozentuale_auswertung, rechenwerte):
 
 
 
+
 def main():
     richtige_werte={0:50.1177, 1:42.2569,2:4.7539,3:2.1128,4:0.3925,5:0.1965,6:0.1441,7:0.024,8:0.00139, 9:0.000154 }
     #print(kombination([9,10,11,12,0]))
@@ -150,7 +153,51 @@ def main():
     print("Prozentuale Ergebnisse: ",prozente)
     print("Prozentuale Abweichungen: ",fehler_berechnen(prozente,richtige_werte))
 
+class Test_Pair(unittest.TestCase):
+    def test_NormalCase(self):
+            farben = [0, 1, 2, 3]
+            werte = [5, 7, 9, 5]
+            self.assertTrue(pair(farben, werte), "Pair nicht erkannt")
+    def test_NoPair(self):
+            farben = [0, 1, 2, 3, 0]
+            werte = [5, 7, 9, 11, 13]
+            self.assertFalse(pair(farben, werte), "Falsches Pair erkannt")
+    def test_EdgeCase(self):
+            farben = [0, 0]
+            werte = [5, 5]
+            self.assertTrue(pair(farben, werte), "Pair nicht erkannt im Edge Case")
 
+class Test_FehlerBerechnen(unittest.TestCase):
+    def test_NormalCase(self):
+            prozentuale_auswertung = {0: 50.0, 1: 40.0, 2: 5.0}
+            rechenwerte = {0: 50.0, 1: 42.0, 2: 4.0}
+            self.assertEqual(fehler_berechnen(prozentuale_auswertung, rechenwerte), {0: 0.0, 1: -4.761904761904773, 2: 25.0}, "Fehlerberechnung falsch")
+    def test_DivideByZero(self):
+            prozentuale_auswertung = {0: 50.0}
+            rechenwerte = {0: 0.0}
+            with self.assertRaises(ZeroDivisionError):
+                fehler_berechnen(prozentuale_auswertung, rechenwerte)
+    def test_NoInput(self):
+            prozentuale_auswertung = {}
+            rechenwerte = {}
+            self.assertEqual(fehler_berechnen(prozentuale_auswertung, rechenwerte), {}, "Fehler für leere Eingabe falsch")
+
+class Test_SimpleSort(unittest.TestCase):
+    def test_NormalCase(self):
+            array = [5, 3, 8, 1, 2]
+            self.assertEqual(simple_sort(array), [1, 2, 3, 5, 8], "Falsch sortiert")
+    def test_AlreadySorted(self):
+            array = [1, 2, 3, 4, 5]
+            self.assertEqual(simple_sort(array), [1, 2, 3, 4, 5], "Schon Sortiertes Array wurde verändert")
+    def test_EmptyArray(self):
+            array = []
+            self.assertEqual(simple_sort(array), [], "Leeres Array falsch behandelt")
 
 if __name__ == "__main__":
     main()
+    #unittest.main() #Test müssen über dem Main sein sonst werden sie nicht gefunden
+
+
+
+
+
