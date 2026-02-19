@@ -1,5 +1,7 @@
 import random
 import unittest
+import functools
+import time
 def karten_ziehen(anzahl):
     auswertung=[]
     # geht alles schneller mit return random.sample(range(1, 53), anzahl)
@@ -57,7 +59,7 @@ def two_pair(farben, werte):
     return False
 """
 def two_pair(farben, werte):
-    return {True: 1, False: 0}[len(set(werte))<=len(werte)-2] # ternärer Operator mit dict für Übung
+    return {True: 1, False: 0}[len(set(werte))<=len(werte)-2] # ternärer Operator mit dict für Übung // beim Dict ist die Reinfolge egal
 
 def triplett(farben, werte):
     werte=simple_sort(werte)
@@ -106,7 +108,20 @@ def straight_flush(farben, werte):
 def royal_flush(farben, werte):
     return flush(farben, werte) and set(werte) == {0,9,10,11,12}
 
+def zeitmesser(func):
+    @functools.wraps(func)
+    def wrapper_timer(*args, **kwargs):
+        print("Zeitmessung beginnt!!!")
+        startzeit = time.perf_counter()
+        value = func(*args, **kwargs)
+        endzeit = time.perf_counter()
+        run_time = endzeit - startzeit
+        print(f"Funktion {func.__name__}() hat {run_time:.4f} Sekunden gebraucht")
+        print("Zeitmessung beendet")
+        return value
 
+    return wrapper_timer
+@zeitmesser
 def absolute_zahlen_berechnen(anzahl):
     ergebnis={}
     for i in range(0,10):
