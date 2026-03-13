@@ -1,0 +1,1608 @@
+  #include <WiFi.h>
+  #include <HTTPClient.h>
+  #include <WebServer.h>
+  #include <ArduinoJson.h>
+  #include "base64.h"
+  #include <AccelStepper.h>
+  #include <FastLED.h>
+  #include <ArduinoOTA.h>
+
+    // === ULTRASCHALL SENSOREN ===
+    // Variablen für Entfernungsmessung
+    long ultraschallDauer;  // Pulsdauer vom Sensor
+    int abstand;            // Berechneter Abstand        
+    int distanz = 0;          // Aktuelle Distanz
+
+    // Kalibrierung vom Fallschacht
+    int mittelwert = 0;                      // Durchschnittswert wenn leer
+    bool kalibriert = false;                 // Wurde kalibriert?
+    const int abweichungsschwelle = 1;       // Änderung ab wann Müll erkannt wird
+    unsigned long letzteMessung = 0;         // Wann wurde zuletzt gemessen
+    const unsigned long messIntervall = 200; // Messintervall in ms
+
+    // Pin-Definitionen für 4 Ultraschall-Sensoren
+    const int trg1 = 27; // Trigger Fallschacht
+    const int ech1 = 26; // Echo Fallschacht
+    const int trg2 = 25; // Trigger Kunststoff-Behälter
+    const int ech2 = 14; // Echo Kunststoff-Behälter
+    const int trg3 = 33; // Trigger Papier-Behälter
+    const int ech3 = 32; // Echo Papier-Behälter
+    const int trg4 = 19; // Trigger Restmüll-Behälter
+    const int ech4 = 18; // Echo Restmüll-Behälter
+
+    // === LICHTSCHRANKEN FÜR SCHLITTEN ===
+    int aktuellerMuellartPin;            // Aktuelles Ziel vom Schlitten
+    //const int initialSensor = ;         // Startposition (links)
+    const int restmuellSensor = 21;      // Position Restmüll
+    const int papiermuellSensor = 22;    // Position Papier
+    const int kunststoffmuellSensor = 23; // Position Kunststoff
+    const unsigned long LICHTSCHRANKEN_SAMPLING_DAUER_US = 5000;  // Längeres Abtastfenster während der Fahrt
+    const unsigned int LICHTSCHRANKEN_SAMPLING_PAUSE_US = 75;    // Kurze Pause zwischen den Prüfzyklen
+
+    // === FÜLLSTÄNDE DER BEHÄLTER ===
+    // Werte werden nach jedem Zyklus gemessen
+    int restmuellHoehe = -1;    // -1 = noch nicht gemessen
+    int papiermuellHoehe = -1;
+    int kunststoffHoehe = -1;
+
+    // === KLAPPEN MOTOREN ===
+    const int IN1 = 2;  // Motor A Richtung 1
+    const int IN2 = 4;  // Motor A Richtung 2
+    const int IN3 = 16; // Motor B Richtung 1
+    const int IN4 = 17; // Motor B Richtung 2
+
+    // === REED-SENSOREN FÜR KLAPPEN ===
+    // Erkennen wenn Klappen ganz offen/geschlossen sind
+    const int reedPin1 = 35; // Motor A geschlossen
+    const int reedPin2 = 34; // Motor A offen (Pull-up, LOW = aktiv)
+    const int reedPin3 = 39; // Motor B geschlossen
+    const int reedPin4 = 36; // Motor B offen (Pull-up, LOW = aktiv)
+
+    // === KLAPPENSTATUS MIT STATE MACHINE ===
+    // Verschiedene Zustände beim Öffnen/Schließen
+    enum KlappenStatus {
+      KLAPPEN_GESCHLOSSEN,          // Beide Klappen zu
+      KLAPPEN_OEFFNEN,              // Klappen werden geöffnet
+      KLAPPEN_PAUSE_NACH_OEFFNEN,   // 2 Sekunden offen lassen
+      KLAPPEN_SCHLIESSEN,           // Klappen werden geschlossen
+      KLAPPEN_PAUSE_NACH_SCHLIESSEN,// 1 Sekunde Schließ-Nachlauf
+      KLAPPEN_FERTIG                // Fertig, zurück zu GESCHLOSSEN
+    };
+
+    KlappenStatus klappenStatus = KLAPPEN_GESCHLOSSEN;
+    unsigned long klappenWarteStart = 0;                    // Wann wurde Wartezeit/nachlauf gestartet
+    const unsigned long KLAPPEN_WARTEZEIT = 2000;           // 2 Sekunden offen lassen
+    const unsigned long KLAPPEN_SCHLIESS_NACHLAUF = 1000;   // 1 Sekunde weiter schließen (damit schneller)
+    bool motorA_fertig = false;                             // Hat Motor A Endposition erreicht?
+    bool motorB_fertig = false;                             // Hat Motor B Endposition erreicht?
+
+    // === WIFI SETUP ===
+    const char* wifi_ssid = "smart-trash";   // WLAN Name des Servers
+    const char* wifi_password = "";      // Netzwerk-Passwort
+
+    // === STATISCHE IP - JEDES GERÄT EIGENE IP ===
+    IPAddress local_IP(10, 42, 0, 180);     // Statische IP auf Server-Netz
+    IPAddress gateway(10, 42, 0, 1);        // Gateway des Server-Netzes
+    IPAddress subnet(255, 255, 255, 0);     // Subnetzmaske
+    IPAddress primaryDNS(8, 8, 8, 8);       // DNS
+    IPAddress secondaryDNS(8, 8, 8, 8);     // Backup DNS
+  
+    const char* predictionServerIP = "10.42.0.1"; // IP des Rasoberry Pi
+    const int   predictionServerPort = 80;
+
+    // Gerätdaten in der Datenbank des Raspberry Pi
+    const char* apiDeviceName = "Smartbin1";
+    const char* apiDeviceLocation = "Saal Tirol";
+    int apiDeviceId = -1;                           // Wird von Server zugewiesen
+
+    // OTA
+    String OTA_Password = "admin";                 // Passwort für OTA Updates
+    String OTA_Hostname = "Hauptsteuerung";        // Hostname für OTA Updates
+
+    // === FUNKTIONSVORWÄRTSDEKLARATIONEN ===
+    void pinSetup();
+    void wifiSetup();
+    bool ensureDeviceRegistered();
+    void otaSetup();
+    void ultraschallKalibrieren();
+    void systemInStartpositionBringen();
+    void serverSetup();
+    void timeoutRecovery();
+    void ledSetzen(CRGB farbe);
+    void motorA_stop();
+    void motorA_vorwaerts();
+    void motorA_rueckwaerts();
+    void motorB_stop();
+    void motorB_vorwaerts();
+    void motorB_rueckwaerts();
+    void schlitten_stop();
+    void schlitten_vorwaerts();
+    void schlitten_rueckwaerts();
+    void restartSchlittenIfNeeded();
+    void startSchlittenMovement(String muellart);
+    void schlittenBewegen();
+    void checkEndschalterReached();
+    void startKlappensteuerung();
+    void handleKlappenComplete();
+    void startReturnToInitialPosition();
+    void checkInitialPositionReached();
+    void measureFillLevels();
+    void sendFillLevelsToApi();
+    void forceKlappenToClosedPosition();
+    void forceSchlittenToInitialPosition();
+    void klappenVerarbeiten();
+    void muellErkennen();
+    void processTrashDetection();
+    bool uploadImagesToServer();
+    void handleWartungsklappe();
+    void handleManualReset();
+
+  // URL Bauen für API-Endpunkte
+  String buildApiUrl(const char* path) {
+    String url = "http://" + String(predictionServerIP);
+    if (predictionServerPort != 80) {
+      url += ":" + String(predictionServerPort);
+    }
+    url += path;
+    return url;
+  }
+
+    // === KAMERA URLS ===
+    // 3 ESP32-CAM Module mit eigenen IPs
+    const char* camIPs[3] = {
+      "http://10.42.0.181/takePhoto",  // Kamera 1
+      "http://10.42.0.182/takePhoto",  // Kamera 2
+      "http://10.42.0.183/takePhoto"   // Kamera 3
+    };
+
+    // === WEBSERVER FÜR KOMMUNIKATION MIT WARTUNGSKLAPPE ===
+    WebServer server(80);                        // HTTP Server auf Port 80
+    bool wartungsklappePausiert = false;         // Ist Wartung aktiv?
+    bool wartungsklappeLetzterStatus = false;    // Status beim letzten Update
+
+    // === LED STRIP ===
+    #define LED_PIN 15
+    #define NUM_LEDS 120
+    CRGB leds[NUM_LEDS];
+
+    // === SCHLITTEN MOTOR ===
+    // Bewegt Schlitten zwischen den Behältern
+    const int schlittenMotor_IN = 5;            // Aktivator
+    const int schlittenMotor_IN1_PWM = 12;      // Richtung rechts
+    const int schlittenMotor_IN2_PWM = 13;      // Richtung links
+    const int SCHLITTEN_PWM_CHANNEL_IN1 = 0;
+    const int SCHLITTEN_PWM_CHANNEL_IN2 = 1;
+    const int SCHLITTEN_PWM_FREQ = 12000;
+    const int SCHLITTEN_PWM_RESOLUTION = 12;
+    int schlitten_in_bewegung = 0;              // 0 = steht, 1 = fährt
+    int schlittenAktuellerDuty = 0;
+
+    // PWM + Sanftanlauf-Konfiguration
+    const int schlittenMaxGeschwindigkeit = 3500;        // LEDC Duty (12 Bit)
+    const unsigned long schlittenRampenZeit = 600;       // 0,6 Sekunden
+    const int schlittenRampenSchritte = 150;             // Feinere Stufen
+    const unsigned long schlittenRampenIntervall = schlittenRampenZeit / schlittenRampenSchritte;
+
+    // Zustände für Schlittenmotor
+    enum SchlittenMotorZustand {
+      SCHLITTEN_STOP,
+      SCHLITTEN_VORWAERTS_RAMPE,
+      SCHLITTEN_RUECKWAERTS_RAMPE,
+      SCHLITTEN_LAUFEND
+    };
+
+    SchlittenMotorZustand schlittenMotorZustand = SCHLITTEN_STOP;
+    unsigned long schlittenLetzteRampeZeit = 0;     // Wann wurde letzte Rampe gestartet
+    int schlittenRampenIndex = 0;                   // Aktueller Schritt
+    bool schlittenRichtungVorwaerts = true;
+
+    // === STEUERUNG FLAGS ===
+    // Flags für State Machine
+    bool warteAufEndschalter = false;         // Wartet auf Ziel-Lichtschranke
+    bool warteAufInitialPosition = false;     // Wartet auf Startposition
+    bool schlittenInInitialPosition = false;  // Darf neuer Einwurf ausgewertet werden?
+
+    // === PREDICTOION VON RASPBERRY PI ===
+    String currentPredictionJson = "";                         // Letzte Prediction
+    bool waitingForPrediction = false;                         // Wartet auf Antwort?
+    unsigned long predictionRequestTime = 0;                   // Wann angefragt
+    const unsigned long maxPredictionWaitTime = 30000;         // Max 30s warten
+
+    // === LOGGING ===
+    String lastPredictionResult = "";   // Letztes Ergebnis als Text
+    bool predictionWasInvalid = false;  // War letzte Prediction ungültig?
+
+    // === TIMEOUT ÜBERWACHUNG ===
+    // Verhindert dass System hängen bleibt
+    unsigned long currentTaskStartTime = 0;           // Wann Task gestartet
+    String currentTaskName = "";                      // Name vom aktuellen Task
+    const unsigned long MAX_TASK_TIMEOUT = 20000;     // Max 20 Sekunden pro Task
+    bool taskTimeoutError = false;                    // Timeout aufgetreten?
+    String timeoutErrorMessage = "";                  // Fehlermeldung
+
+    // === SYSTEM STATUS ===
+    bool systemInitialisiert = false;                 // Wurde Setup abgeschlossen?
+
+    // === SETUP FUNKTION ===
+    void setup() {
+      Serial.begin(115200);
+      Serial.println("System startet...");
+      
+      // LED Strip initialisieren
+      FastLED.addLeds<WS2812B, LED_PIN, GRB>(leds, NUM_LEDS);
+      FastLED.setBrightness(100);
+      fill_solid(leds, NUM_LEDS, CRGB::Black);  // Alle LEDs aus
+      FastLED.show();
+      
+      // Alle Setup-Funktionen aufrufen
+      pinSetup();                    // Pins konfigurieren
+      wifiSetup();                   // WiFi verbinden
+      if (!ensureDeviceRegistered()) {
+        Serial.println("ACHTUNG: Device-Registrierung fehlgeschlagen - wird später nocheinmal versucht");
+      }
+      otaSetup();                    // OTA Updates aktivieren
+      ultraschallKalibrieren();      // Fallschacht kalibrieren
+      
+      // System in Startposition bringen
+      Serial.println("System fährt in Startposition");
+      systemInStartpositionBringen();
+      systemInitialisiert = true;
+      Serial.println("System bereit");
+    }
+
+    // === PIN SETUP ===
+    void pinSetup() {
+      // Ultraschall Sensoren
+      pinMode(trg1, OUTPUT); pinMode(ech1, INPUT);
+      pinMode(trg2, OUTPUT); pinMode(ech2, INPUT);
+      pinMode(trg3, OUTPUT); pinMode(ech3, INPUT);
+      pinMode(trg4, OUTPUT); pinMode(ech4, INPUT);
+
+      // Klappen Motoren
+      pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT);
+      pinMode(IN3, OUTPUT); pinMode(IN4, OUTPUT);
+
+      // Reed-Sensoren
+      pinMode(reedPin1, INPUT); pinMode(reedPin2, INPUT);
+      pinMode(reedPin3, INPUT); pinMode(reedPin4, INPUT);
+
+      // Schlitten Motor
+      pinMode(schlittenMotor_IN, OUTPUT);
+      digitalWrite(schlittenMotor_IN, HIGH); 
+      pinMode(schlittenMotor_IN1_PWM, OUTPUT);
+      pinMode(schlittenMotor_IN2_PWM, OUTPUT);
+      ledcSetup(SCHLITTEN_PWM_CHANNEL_IN1, SCHLITTEN_PWM_FREQ, SCHLITTEN_PWM_RESOLUTION);
+      ledcSetup(SCHLITTEN_PWM_CHANNEL_IN2, SCHLITTEN_PWM_FREQ, SCHLITTEN_PWM_RESOLUTION);
+      ledcAttachPin(schlittenMotor_IN1_PWM, SCHLITTEN_PWM_CHANNEL_IN1);
+      ledcAttachPin(schlittenMotor_IN2_PWM, SCHLITTEN_PWM_CHANNEL_IN2);
+      ledcWrite(SCHLITTEN_PWM_CHANNEL_IN1, 0);
+      ledcWrite(SCHLITTEN_PWM_CHANNEL_IN2, 0);
+
+      // Lichtschranken
+      pinMode(restmuellSensor, INPUT);
+      pinMode(kunststoffmuellSensor, INPUT);
+      pinMode(papiermuellSensor, INPUT);
+    }
+
+    // === WIFI SETUP ===
+    // Verbindet mit WLAN und startet Server
+    void wifiSetup() {
+      Serial.println("\n---- WiFi Setup");
+      
+      WiFi.mode(WIFI_STA);  // Station Mode (kein AP)
+      
+      // Statische IP setzen
+      if (!WiFi.config(local_IP, gateway, subnet, primaryDNS, secondaryDNS)) {
+        Serial.println("IP Setup Fehler");
+      } else {
+        Serial.println("IP gesetzt");
+        Serial.print("  IP: "); Serial.println(local_IP);
+        Serial.print("  Gateway: "); Serial.println(gateway);
+      }
+      
+      // Mit WLAN verbinden
+      WiFi.begin(wifi_ssid, wifi_password);
+      Serial.print("Verbinde mit "); Serial.print(wifi_ssid);
+      
+      // Warte bis verbunden (max 10 sekunden)
+      unsigned long startVersuch = millis();
+      while (WiFi.status() != WL_CONNECTED && millis() - startVersuch < 10000) {
+        delay(500);
+        Serial.print(".");
+      }
+      
+      // Wenn erfolgreich verbunden
+      if (WiFi.status() == WL_CONNECTED) {
+        Serial.println();
+        Serial.println("WiFi OK");
+        Serial.print("  IP: "); Serial.println(WiFi.localIP());
+        Serial.print("  Gateway: "); Serial.println(WiFi.gatewayIP());
+      } else {
+        Serial.println("\n WiFi Fehler");
+        return;
+      }
+      serverSetup();  // HTTP Server starten
+    }
+
+    // === OTA SETUP ===
+    // Aktiviert Over-The-Air Updates via WiFi
+    void otaSetup() {
+      ArduinoOTA.setHostname(OTA_Hostname.c_str());
+      ArduinoOTA.setPassword(OTA_Password.c_str());
+      
+      // Beim Update-Start
+      ArduinoOTA.onStart([]() {
+        motorA_stop();           // Alle Motoren stoppen
+        motorB_stop();
+        schlitten_stop();
+        ledSetzen(CRGB::Orange); // LED Orange = Update läuft
+        Serial.println("OTA Start");
+      });
+      
+      // Wenn Update fertig
+      ArduinoOTA.onEnd([]() {
+        Serial.println("\nOTA fertig");
+        ledSetzen(CRGB::Green);
+        delay(1000);
+      });
+      
+      // Während Update läuft
+      ArduinoOTA.onProgress([](unsigned int fortschritt, unsigned int gesamt) {
+        unsigned int prozent = (fortschritt / (gesamt / 100));
+        Serial.printf("OTA: %u%%\r", prozent);
+        
+        // LED blinken als Fortschrittsanzeige
+        static unsigned long letztesBlinken = 0;
+        if (millis() - letztesBlinken > 200) {
+          letztesBlinken = millis();
+          static bool ledZustand = false;
+          ledZustand = !ledZustand;
+          ledSetzen(ledZustand ? CRGB::Red : CRGB::Black);
+        }
+      });
+      
+      // Bei Fehler
+      ArduinoOTA.onError([](ota_error_t fehler) {
+        Serial.printf("OTA Fehler[%u]: ", fehler);
+        if (fehler == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+        else if (fehler == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+        else if (fehler == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+        else if (fehler == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+        else if (fehler == OTA_END_ERROR) Serial.println("End Failed");
+        
+        ledSetzen(CRGB::Red);
+        delay(2000);
+        ledSetzen(CRGB::Black);
+      });
+      
+      ArduinoOTA.begin();
+      Serial.println(" OTA aktiv");
+      Serial.print("  IP: "); Serial.println(WiFi.localIP());
+      // Lösung basierend auf: https://github.com/espressif/arduino-esp32/blob/master/libraries/ArduinoOTA/examples/BasicOTA/BasicOTA.ino
+    }
+
+    // === SERVER SETUP ===
+    // Startet HTTP Server für den Wartungsklappen-ESP
+    void serverSetup() {
+      server.on("/wartungsklappe", HTTP_POST, handleWartungsklappe);   // Wartung
+      server.on("/reset", HTTP_POST, handleManualReset);               // Manueller Reset
+      server.begin();
+      Serial.println("Server läuft");
+      Serial.print("URL: http://"); Serial.println(WiFi.localIP());
+    }
+
+    // Setzt alle LEDs auf eine Farbe
+    void ledSetzen(CRGB farbe) {
+      fill_solid(leds, NUM_LEDS, farbe);
+      FastLED.show();
+    }
+
+    // === ZYKLUS FERTIG SIGNAL ===
+    // Blinkt 3x grün wenn Müll sortiert wurde
+    void zyklusFertigSignal() {
+      Serial.println("Zyklus fertig - LED 3x grün");
+      for (int i = 0; i < 3; i++) {
+        ledSetzen(CRGB::Green);
+        delay(300);
+        ledSetzen(CRGB::Black);
+        delay(300);
+      }
+      
+      Serial.println("Bereit für nächsten Einwurf - LED aus");
+    }
+
+    // === TIMEOUT ÜBERWACHUNG ===
+    // Damit das System nicht hängen bleibt
+    // Startet Timer für einen Task
+    void taskStarten(String taskName) {
+      currentTaskStartTime = millis();
+      currentTaskName = taskName;
+      taskTimeoutError = false;
+      timeoutErrorMessage = "";
+      Serial.println("Start: " + taskName);
+    }
+
+    // Beendet aktuellen Task
+    void taskBeenden() {
+      if (currentTaskName != "") {
+        unsigned long dauer = millis() - currentTaskStartTime;
+        Serial.println("Ende: Task " + currentTaskName + " hat " + String(dauer) + "ms gedauert");
+        currentTaskName = "";
+        currentTaskStartTime = 0;
+      }
+    }
+
+    // Prüft ob Task zu lange läuft
+    void timeoutPruefen() {
+      if (currentTaskName != "" && currentTaskStartTime > 0) {
+        unsigned long dauer = millis() - currentTaskStartTime;
+        if (dauer > MAX_TASK_TIMEOUT) {
+          if (!taskTimeoutError) {  // Nur einmal melden
+            taskTimeoutError = true;
+            timeoutErrorMessage = "TIMEOUT: '" + currentTaskName + "' läuft " + 
+                                String(dauer/1000) + " Sekunden";
+            Serial.println(timeoutErrorMessage);
+            timeoutRecovery();  // Automatischer Reset auf Startposition
+          }
+        }
+      }
+    }
+
+    // === TIMEOUT RECOVERY ===
+    // Bricht ab, schließt die Klappen und Fährt zurück zur Startposition
+    void timeoutRecovery() {
+      Serial.println("\nZEITÜBERSCHREITUNG: System wird resettet");
+      
+      // 1. Alle Motoren stoppen
+      motorA_stop();
+      motorB_stop();
+      schlitten_stop();
+      
+      // 2. Status zurücksetzen
+      klappenStatus = KLAPPEN_GESCHLOSSEN;
+      warteAufEndschalter = false;
+      warteAufInitialPosition = false;
+      waitingForPrediction = false;
+      currentPredictionJson = "";
+      
+      // 3. Task beenden
+      taskBeenden();
+      
+      // 4. System zurück zur Startposition
+      Serial.println("Fahre zurück zur Startposition");
+      systemInStartpositionBringen();
+      
+      // 5. Fehler zurücksetzen
+      taskTimeoutError = false;
+      timeoutErrorMessage = "";
+      
+      Serial.println("System zurückgesetzt");
+      Serial.println("Bereit für nächsten Einwurf");
+    }
+
+
+    // === SCHLITTEN SANFTANLAUF ===
+    // Rampengesteuerte PWM-Ausgabe für den Schlittenmotor
+    void schlittenPwmAusgabe(int duty, bool vorwaerts) {
+      duty = constrain(duty, 0, schlittenMaxGeschwindigkeit);
+      schlittenAktuellerDuty = duty;
+      if (vorwaerts) {
+        ledcWrite(SCHLITTEN_PWM_CHANNEL_IN1, duty);
+        ledcWrite(SCHLITTEN_PWM_CHANNEL_IN2, 0);
+      } else {
+        ledcWrite(SCHLITTEN_PWM_CHANNEL_IN1, 0);
+        ledcWrite(SCHLITTEN_PWM_CHANNEL_IN2, duty);
+      }
+    }
+
+    void schlittenSanftStoppen() {
+      const int decStep = max(1, schlittenMaxGeschwindigkeit / 25);
+      while (schlittenAktuellerDuty > 0) {
+        int nextDuty = max(0, schlittenAktuellerDuty - decStep);
+        schlittenPwmAusgabe(nextDuty, schlittenRichtungVorwaerts);
+        delay(5);
+      }
+      ledcWrite(SCHLITTEN_PWM_CHANNEL_IN1, 0);
+      ledcWrite(SCHLITTEN_PWM_CHANNEL_IN2, 0);
+      schlittenAktuellerDuty = 0;
+    }
+
+    void starteSchlittenRampe(bool vorwaerts) {
+      schlittenRichtungVorwaerts = vorwaerts;
+      schlittenRampenIndex = 0;
+      schlittenLetzteRampeZeit = millis();
+      schlittenMotorZustand = vorwaerts ? SCHLITTEN_VORWAERTS_RAMPE : SCHLITTEN_RUECKWAERTS_RAMPE;
+      schlitten_in_bewegung = 1;
+    }
+
+    void schlittenRampeUpdate(unsigned long jetzt) {
+      if (schlittenMotorZustand == SCHLITTEN_STOP) return;
+      if (jetzt - schlittenLetzteRampeZeit < schlittenRampenIntervall) return;
+
+      schlittenLetzteRampeZeit = jetzt;
+      int pwmWert = schlittenMaxGeschwindigkeit;
+
+      if (schlittenMotorZustand == SCHLITTEN_VORWAERTS_RAMPE || schlittenMotorZustand == SCHLITTEN_RUECKWAERTS_RAMPE) {
+        pwmWert = map(schlittenRampenIndex, 0, schlittenRampenSchritte, 0, schlittenMaxGeschwindigkeit);
+        schlittenRampenIndex++;
+
+        if (schlittenRampenIndex > schlittenRampenSchritte) {
+          schlittenMotorZustand = SCHLITTEN_LAUFEND;
+          pwmWert = schlittenMaxGeschwindigkeit;
+          Serial.println("Schlitten: Maximalgeschwindigkeit erreicht");
+        }
+      }
+
+      schlittenPwmAusgabe(pwmWert, schlittenRichtungVorwaerts);
+    }
+
+    // === HAUPTPROGRAMM ===
+    void loop() {
+      server.handleClient();  // HTTP Anfragen bearbeiten
+      ArduinoOTA.handle();    // OTA Updates prüfen
+      
+      timeoutPruefen();  // Timeout-Überwachung
+      schlittenRampeUpdate(millis());  // PWM-Rampe aktualisieren
+      
+      // Alle 10 Sekunden WiFi-Verbindung prüfen
+      static unsigned long letzterWifiCheck = 0;
+      if (millis() - letzterWifiCheck >= 10000) {
+        letzterWifiCheck = millis();
+        if (WiFi.status() != WL_CONNECTED) {
+          Serial.println(" WiFi verloren - versuche neu zu verbinden");
+          WiFi.reconnect();
+        }
+      }
+      
+      // Bei Wartung: Nur Server-Anfragen, Rest stoppen
+      if (wartungsklappePausiert) return;
+      
+      // Hauptfunktionen
+      klappenVerarbeiten();  // Klappen State Machine
+      muellErkennen();       // Ultraschall prüfen
+      schlittenBewegen();    // Schlitten bewegen
+    }
+
+    // === ULTRASCHALLMESSUNG ===
+    // Misst Entfernung mit Ultraschall-Sensor
+    int entfernung(int trigPin, int echoPin) {
+      digitalWrite(trigPin, LOW); 
+      delayMicroseconds(2);
+      digitalWrite(trigPin, HIGH); 
+      delayMicroseconds(10);
+      digitalWrite(trigPin, LOW);
+
+      ultraschallDauer = pulseIn(echoPin, HIGH, 25000);
+      if (ultraschallDauer == 0) return -1;  // Gibt -1 zurück wenn Messung fehlschlägt
+      abstand = ultraschallDauer * 0.034 / 2;  // Umrechnung in cm
+      return abstand;
+    }
+
+    // === BILD VON KAMERA HOLEN ===
+    // Holt ein Foto von einer ESP32-CAM
+    // Gibt Base64-kodierten String zurück
+    String getCameraImage(const char* url) {
+      // Prüfen ob Wartung aktiv
+      if (wartungsklappePausiert) {
+        Serial.println(" Wartung aktiv - keine Kamera-Abfrage");
+        return "";
+      }
+      
+      HTTPClient http;
+      http.begin(url);
+      http.setTimeout(10000);  // 10 Sekunden Timeout für Kamera
+      int httpCode = http.GET();
+      
+      if (httpCode != 200) { 
+        Serial.printf("Fehler bei %s: %d\n", url, httpCode); 
+        http.end(); 
+        return ""; 
+      }
+      
+      WiFiClient* stream = http.getStreamPtr();
+      int len = http.getSize(); 
+      if (len <= 0) len = 50000;  // Fallback wenn Größe unbekannt
+      
+      // Weil das Bild früher manchmal zu groß für den RAM war
+      size_t maxAlloc = ESP.getMaxAllocHeap();
+      if (maxAlloc == 0) maxAlloc = ESP.getFreeHeap();
+      if (len > static_cast<int>(maxAlloc - 2048)) {
+        Serial.printf("Bild zu groß (%d Bytes > %d Bytes verfügbare Heap) - überspringe Kamera\n", len, static_cast<int>(maxAlloc - 2048));
+        http.end();
+        return "";
+      }
+      // Speicher für Bild reservieren
+      uint8_t* buf = (uint8_t*)malloc(len);
+      if (!buf) { 
+        Serial.println("Nicht genug RAM für Bild"); 
+        http.end(); 
+        return ""; 
+      }
+      
+      // Bild herunterladen und Base64 kodieren
+      stream->readBytes(buf, len);
+      String b64 = base64::encode(buf, len);
+      free(buf);  // Speicher freigeben
+      http.end();
+      
+      return b64;
+      // Lösung basiert auf: https://github.com/espressif/arduino-esp32/blob/master/libraries/HTTPClient/examples/StreamHttpClient/StreamHttpClient.ino
+    }
+
+    // === MÜLLARTEN PIN ZUORDNUNG ===
+    // Gibt Lichtschranken-Pin für Müllart zurück
+    int muellartPin(String muellart) {
+      if (muellart == "INITIAL") return restmuellSensor; // Initialposition nur noch Restmüllposition
+      else if (muellart == "RESTMUELL") return restmuellSensor;
+      else if (muellart == "PAPIER") return papiermuellSensor;
+      else if (muellart == "KUNSTSTOFF") return kunststoffmuellSensor;
+      return -1;  // Ungültige Müllart
+    }
+
+    bool lichtschrankeAktiv(int pin) {
+      if (pin < 0) {
+        return false;
+      }
+
+      if (!schlitten_in_bewegung) {
+        return digitalRead(pin) == HIGH;
+      }
+
+      const unsigned long start = micros();
+      while (micros() - start < LICHTSCHRANKEN_SAMPLING_DAUER_US) {
+        if (digitalRead(pin) == HIGH) {
+          return true;
+        }
+        delayMicroseconds(LICHTSCHRANKEN_SAMPLING_PAUSE_US);
+      }
+      return false;
+    }
+
+    bool obereEndposition(int s1, int s2, int s3, int s4) {
+      return (s1 == HIGH && s2 == HIGH && s3 == HIGH && s4 == HIGH);
+    }
+
+    bool untereEndposition(int s1, int s2, int s3, int s4) {
+      return (s1 == LOW && s2 == LOW && s3 == LOW && s4 == LOW);
+    }
+
+    // === KLAPPEN STATE MACHINE ===
+    // Steuert beide Klappen
+    // Läuft in loop() bis Status = FERTIG
+    void KlappensteuerungNonBlocking() {
+      // Alle Reed-Sensoren lesen
+      int s1 = digitalRead(reedPin1);  // Motor A geschlossen
+      int s2 = digitalRead(reedPin2);  // Motor A offen
+      int s3 = digitalRead(reedPin3);  // Motor B geschlossen
+      int s4 = digitalRead(reedPin4);  // Motor B offen
+
+      Serial.printf("Reed: %d %d %d %d | Zustand: %d\n", s1, s2, s3, s4, static_cast<int>(klappenStatus));// Debug-Ausgabe
+      // Spammt Serial Monitor ziemlich voll
+
+      switch (klappenStatus) {
+        case KLAPPEN_OEFFNEN:
+          if (!untereEndposition(s1, s2, s3, s4)) {
+            motorA_vorwaerts();
+            motorB_vorwaerts();
+          } else {
+            motorA_stop();
+            motorB_stop();
+            motorA_fertig = true;
+            motorB_fertig = true;
+            klappenWarteStart = millis();
+            klappenStatus = KLAPPEN_PAUSE_NACH_OEFFNEN;
+            Serial.println("OFFEN erreicht - Pause nach Öffnen");
+          }
+          break;
+
+        case KLAPPEN_PAUSE_NACH_OEFFNEN:
+          if (millis() - klappenWarteStart >= KLAPPEN_WARTEZEIT) {
+            klappenStatus = KLAPPEN_SCHLIESSEN;
+            motorA_fertig = false;
+            motorB_fertig = false;
+            Serial.println("Pause vorbei - Klappen schließen");
+          }
+          break;
+
+        case KLAPPEN_SCHLIESSEN:
+          if (!obereEndposition(s1, s2, s3, s4)) {
+            motorA_rueckwaerts();
+            motorB_rueckwaerts();
+          } else {
+            klappenWarteStart = millis();
+            motorA_fertig = true;
+            motorB_fertig = true;
+            klappenStatus = KLAPPEN_PAUSE_NACH_SCHLIESSEN;
+            Serial.println("Geschlossen erreicht - 1 Sekunde Nachlauf");
+          }
+          break;
+
+        case KLAPPEN_PAUSE_NACH_SCHLIESSEN:
+          // Schlitten darf sich bewegen, Klappen schließen aber noch mehr für höhere Stabilität des Bodens
+          if (millis() - klappenWarteStart < KLAPPEN_SCHLIESS_NACHLAUF) {
+            motorA_rueckwaerts();
+            motorB_rueckwaerts();
+          } else {
+            motorA_stop();
+            motorB_stop();
+            klappenStatus = KLAPPEN_FERTIG;
+            Serial.println("Nachlauf beendet - Klappen fertig");
+          }
+          break;
+
+        default:
+          break;
+      }
+    }
+
+    // === MOTOR STEUERUNG ===
+    // Alle Motor-Funktionen prüfen ob Wartung aktiv ist
+    // Bei Wartung wird nichts bewegt
+
+    void motorA_vorwaerts() {
+      if (wartungsklappePausiert) return;
+      digitalWrite(IN1, HIGH);
+      digitalWrite(IN2, LOW);
+    }
+
+    void motorA_rueckwaerts() {
+      if (wartungsklappePausiert) return;
+      digitalWrite(IN1, LOW);
+      digitalWrite(IN2, HIGH);
+    }
+
+    void motorA_stop() {
+      digitalWrite(IN1, LOW);
+      digitalWrite(IN2, LOW);
+    }
+
+    void motorB_vorwaerts() {
+      if (wartungsklappePausiert) return;
+      digitalWrite(IN3, HIGH);
+      digitalWrite(IN4, LOW);
+    }
+
+    void motorB_rueckwaerts() {
+      if (wartungsklappePausiert) return;
+      digitalWrite(IN3, LOW);
+      digitalWrite(IN4, HIGH);
+    }
+
+    void motorB_stop() {
+      digitalWrite(IN3, LOW);
+      digitalWrite(IN4, LOW);
+    }
+
+    void schlitten_vorwaerts() {
+      if (wartungsklappePausiert) return; 
+      starteSchlittenRampe(true);
+    }
+
+    void schlitten_rueckwaerts() {
+      if (wartungsklappePausiert) return;
+      starteSchlittenRampe(false);
+    }
+
+    void schlitten_stop() {  
+      schlittenSanftStoppen();
+      schlittenMotorZustand = SCHLITTEN_STOP;
+      schlittenRampenIndex = 0;
+      schlitten_in_bewegung = 0;
+    }
+
+    // === SCHLITTEN NACH WARTUNG NEUSTARTEN ===
+    // Wenn Wartung beendet wird und Schlitten unterbrochen war, wird die Fahrt hier fortgesetzt
+    void restartSchlittenIfNeeded() {
+      if (warteAufEndschalter) {
+        Serial.println("Schlitten war unterbrochen - starte Vorwärtsfahrt wieder");
+        schlitten_vorwaerts();
+      }
+      else if (warteAufInitialPosition) {
+        Serial.println("Schlitten war unterbrochen - starte Rückwärtsfahrt wieder");
+        schlitten_rueckwaerts();
+      }
+      else {
+        Serial.println("Schlitten war nicht in Bewegung - kein Neustart nötig");
+      }
+    }
+
+    // === SCHLITTEN BEWEGUNG STARTEN ===
+    // Startet Fahrt zu einem Behälter
+    void startSchlittenMovement(String muellart) {
+      taskStarten("Schlitten fährt zu " + muellart);
+      aktuellerMuellartPin = muellartPin(muellart);
+      warteAufEndschalter = true;
+      schlittenInInitialPosition = false;
+      schlitten_vorwaerts();
+    }
+
+    // === SCHLITTEN BEWEGUNG VERARBEITEN ===
+    void schlittenBewegen() {
+      checkEndschalterReached();        // Ziel erreicht?
+      handleKlappenComplete();          // Klappen fertig?
+      checkInitialPositionReached();    // Zurück an Start?
+    }
+
+    // === ENDSCHALTER ERREICHT?  ===
+    // Prüft ob Schlitten Ziel-Behälter erreicht hat
+    void checkEndschalterReached() {
+      if (warteAufEndschalter && lichtschrankeAktiv(aktuellerMuellartPin)) {
+        Serial.println("Position erreicht");
+        taskBeenden();
+        warteAufEndschalter = false;
+        schlitten_stop();
+        startKlappensteuerung();  // Jetzt Klappen öffnen
+      }
+    }
+
+    // === KLAPPENSTEUERUNG STARTEN ===
+    // Startet das Öffnen der Klappen
+    void startKlappensteuerung() {
+      taskStarten("Klappen öffnen und schließen");
+      Serial.println("Starte Klappensteuerung");
+      klappenStatus = KLAPPEN_OEFFNEN;
+      motorA_fertig = false;
+      motorB_fertig = false;
+    }
+
+    // === KLAPPEN FERTIG? ===
+    // Prüft ob Klappen komplett fertig sind
+    void handleKlappenComplete() {
+      if (klappenStatus == KLAPPEN_FERTIG) {
+        taskBeenden();
+        Serial.println("Klappen geschlossen - Schlitten bereit zum zurückfahren");
+        klappenStatus = KLAPPEN_GESCHLOSSEN;
+        startReturnToInitialPosition();  // Zurück zur Startposition
+      }
+    }
+
+    // === RÜCKFAHRT STARTEN ===
+    // Fährt Schlitten zurück zur Startposition
+    void startReturnToInitialPosition() {
+      taskStarten("Schlitten zurück zur Startposition");
+      aktuellerMuellartPin = muellartPin("INITIAL");
+      schlitten_rueckwaerts();
+      warteAufInitialPosition = true;
+    }
+
+    // === INITIALPOSITION ERREICHT? ===
+    // Prüft ob Schlitten wieder an Start ist
+    void checkInitialPositionReached() {
+      if (warteAufInitialPosition && lichtschrankeAktiv(aktuellerMuellartPin)) {
+        taskBeenden();
+        schlitten_stop();
+        Serial.println("Schlitten hat Initialposition erreicht");
+        measureFillLevels();  // Füllstände messen
+        warteAufInitialPosition = false;
+        schlittenInInitialPosition = true;
+      }
+    }
+
+    // === FÜLLSTÄNDE MESSEN ===
+    // Misst alle 3 Behälter mit den Ultraschallsensoren und sendet Werte an API
+    void measureFillLevels() {
+      taskStarten("Füllstände messen");
+      kunststoffHoehe = entfernung(trg2, ech2);
+      papiermuellHoehe = entfernung(trg3, ech3);
+      restmuellHoehe = entfernung(trg4, ech4);
+      
+      Serial.print("Restmüllhöhe: "); Serial.print(restmuellHoehe);
+      Serial.print(" Papiermüllhöhe: "); Serial.print(papiermuellHoehe);
+      Serial.print(" Kunststoffhöhe: "); Serial.println(kunststoffHoehe);
+      
+      taskBeenden();
+      sendFillLevelsToApi();
+      
+      zyklusFertigSignal();  //Kompletter Zyklus fertig --> 3x grün blinken
+    }
+
+    // === KI PREDICTION ANALYSIEREN ===
+    // Parst JSON vom Raspberry Pi und gibt beste Müllart zurück
+    String normalizePredictionLabel(String rawLabel) {
+      // hätte man auch in der muellartPin Funktion machen können, dann aber nicht abwärtskompatibel mit den alten Testversionen
+      rawLabel.trim();
+      rawLabel.toLowerCase();
+      if (rawLabel.length() == 0) return "";
+      if (rawLabel == "plastic" || rawLabel == "kunststoff") return "KUNSTSTOFF";
+      if (rawLabel == "paper" || rawLabel == "papier") return "PAPIER";
+      if (rawLabel == "waste" || rawLabel == "restmuell" || rawLabel == "restmull") return "RESTMUELL";
+      if (rawLabel == "metal" || rawLabel == "metall") return "KUNSTSTOFF"; // Metall und Kunststoff in den gleichen Behälter
+      return "";
+    }
+
+    String useFallbackPrediction(const String& message) {
+      Serial.println(message);
+      lastPredictionResult = message;
+      predictionWasInvalid = true;
+      currentPredictionJson = "";
+      return "KUNSTSTOFF"; // FALLBACK später ändern auf RESTMUELL
+    }
+
+    String analyzeTrashTypeFromServer() {
+      if (currentPredictionJson == "") {
+        return useFallbackPrediction("Prediction fehlerhaft - verwende RESTMUELL");
+      }
+      Serial.println(currentPredictionJson);
+
+      StaticJsonDocument<4096> predDoc;
+      DeserializationError error = deserializeJson(predDoc, currentPredictionJson);
+      if (error) {
+        return useFallbackPrediction("JSON parse error: " + String(error.c_str()));
+      }
+
+      JsonArray imagePredictions = predDoc.as<JsonArray>();
+      if (imagePredictions.isNull()) {
+        return useFallbackPrediction("Prediction JSON kein Array - verwende RESTMUELL");
+      }
+
+      float maxProbability = -1.0f;
+      String bestRawLabel = "";
+
+      for (JsonVariant imageVariant : imagePredictions) {
+        if (!imageVariant.is<JsonArray>()) {
+          continue;
+        }
+        for (JsonVariant predictionVariant : imageVariant.as<JsonArray>()) {
+          if (!predictionVariant.is<JsonArray>()) {
+            continue;
+          }
+          JsonArray entry = predictionVariant.as<JsonArray>();
+          if (entry.size() < 2) {
+            continue;
+          }
+          const char* label = entry[0].as<const char*>();
+          if (!label) {
+            continue;
+          }
+          float probability = entry[1].as<float>();
+          if (probability > maxProbability) {
+            maxProbability = probability;
+            bestRawLabel = label;
+          }
+        }
+      }
+      //Lösung basiert auf: https://arduinojson.org/v7/tutorial/deserialization/
+
+      if (bestRawLabel == "") {
+        return useFallbackPrediction("Keine gültigen Predictions - verwende RESTMUELL");
+      }
+
+      String normalizedLabel = normalizePredictionLabel(bestRawLabel);
+      if (normalizedLabel == "") {
+        return useFallbackPrediction("Unbekannte Müllart erkannt: " + bestRawLabel);
+      }
+
+      Serial.print("Erkannte Müllart vom Raspberry: ");
+      Serial.print(normalizedLabel);
+      Serial.print(" (Wahrscheinlichkeit: ");
+      Serial.print(maxProbability * 100, 2); // auf 2 Stellen gerundet
+      Serial.println("%)");
+
+      lastPredictionResult = normalizedLabel + " (" + String(maxProbability * 100, 2) + "%)";
+      predictionWasInvalid = false;
+      currentPredictionJson = "";
+      return normalizedLabel;
+    }
+
+    // === WARTUNGSKLAPPE HANDLER ===
+    // Empfängt Updates der Wartungsklappensteuerung
+    void handleWartungsklappe() {
+      if (!server.hasArg("plain")) {
+        server.send(400, "application/json", "{\"error\":\"Missing JSON body\"}");
+        return;
+      }
+      
+      String body = server.arg("plain");
+      Serial.println("Wartungsklappe JSON empfangen: " + body);
+      
+      StaticJsonDocument<200> doc;
+      DeserializationError error = deserializeJson(doc, body);
+      
+      if (error) {
+        Serial.print("JSON Parse Fehler: "); Serial.println(error.c_str());
+        server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+        return;
+      }
+      
+      String status = doc["status"];
+      bool led = doc["led"];
+      bool reed = doc["reed"];
+      int servo = doc["servo"];
+      
+      // Wartung wird geöffnet
+      if (status == "offen") {
+        Serial.println("WARTUNG: System wird SOFORT blockiert - Alle Motoren stoppen");
+        
+        wartungsklappePausiert = true;
+        wartungsklappeLetzterStatus = true;
+        
+        // Laufende Tasks beenden
+        if (currentTaskName != "") {
+          taskBeenden();
+          Serial.println("Task unterbrochen: " + currentTaskName);
+        }
+        
+        // ALLE Motoren SOFORT stoppen!
+        motorA_stop();
+        motorB_stop();
+        schlitten_stop();
+        
+        Serial.println("WARTUNG AKTIV - Alle Motoren gestoppt");
+      } 
+      // Wartung wird geschlossen
+      else if (status == "geschlossen") {
+        Serial.println("WARTUNG BEENDET - System wird freigegeben");
+        
+        wartungsklappePausiert = false;
+        wartungsklappeLetzterStatus = false;
+        
+        // Fehler zurücksetzen
+        taskTimeoutError = false;
+        timeoutErrorMessage = "";
+        
+        // Wenn Schlitten in Bewegung war, weiter fahren
+        if (warteAufEndschalter || warteAufInitialPosition) {
+          Serial.println("   Setze unterbrochene Schlittenfahrt fort...");
+          restartSchlittenIfNeeded();
+        } else {
+          Serial.println("   Keine unterbrochene Fahrt - System bereit");
+        }
+      }
+      server.send(200, "application/json", "{\"status\":\"ok\",\"received\":true}");
+    }
+
+    // === SYSTEM RESET ===
+    // Bringt komplettes System in Startposition
+    void systemInStartpositionBringen() {
+      Serial.println("\n SYSTEM-RESET: Bringe alles in Initialposition...");
+      
+      ledSetzen(CRGB::Yellow);  // Gelb = Reset läuft
+      
+      // Motoren stoppen
+      motorA_stop();
+      motorB_stop();
+      schlitten_stop();
+      
+      // Alle Flags zurücksetzen
+      klappenStatus = KLAPPEN_GESCHLOSSEN;
+      warteAufEndschalter = false;
+      warteAufInitialPosition = false;
+      schlitten_in_bewegung = 0;
+      motorA_fertig = false;
+      motorB_fertig = false;
+      waitingForPrediction = false;
+      currentPredictionJson = "";
+      
+      delay(500);
+      
+      // 1. Klappen schließen
+      forceKlappenToClosedPosition();
+      
+      // 2. Schlitten zur Startposition
+      schlittenInInitialPosition = false;
+      forceSchlittenToInitialPosition();
+      
+      // 3. Füllstände messen
+      measureFillLevels();
+      
+      Serial.println("System-Reset abgeschlossen - Initialposition erreicht");
+      ledSetzen(CRGB::Black);  // LEDs aus
+    }
+
+    // === KLAPPEN RESET-SCHLIESSEN ===
+    // Zwingt Klappen zum Schließen
+    void forceKlappenToClosedPosition() {
+      Serial.println("Reset: Schließe alle Klappen...");
+      
+      bool motorA_geschlossen = (digitalRead(reedPin1) == HIGH);
+      bool motorB_geschlossen = (digitalRead(reedPin3) == HIGH);
+      
+      if (motorA_geschlossen && motorB_geschlossen) {
+        Serial.println("Klappen bereits geschlossen");
+        return;
+      }
+      
+      unsigned long resetStartTime = millis();
+      const unsigned long RESET_TIMEOUT = 10000;
+      
+      // Blockiert, aber ok weil nur für Reset
+      while ((!motorA_geschlossen || !motorB_geschlossen) && 
+            (millis() - resetStartTime < RESET_TIMEOUT)) {
+        
+        // Motor A schließen
+        if (!motorA_geschlossen) {
+          if (digitalRead(reedPin1) == HIGH) {
+            motorA_stop();
+            motorA_geschlossen = true;
+            Serial.println("  Motor A geschlossen");
+          } else {
+            digitalWrite(IN1, LOW);
+            digitalWrite(IN2, HIGH);
+          }
+        }
+        
+        // Motor B schließen
+        if (!motorB_geschlossen) {
+          if (digitalRead(reedPin3) == HIGH) {
+            motorB_stop();
+            motorB_geschlossen = true;
+            Serial.println("  Motor B geschlossen");
+          } else {
+            digitalWrite(IN3, LOW);
+            digitalWrite(IN4, HIGH);
+          }
+        }
+        delay(100);
+      }
+      
+      motorA_stop(); // Für Sicherheit
+      motorB_stop(); // Für Sicherheit
+      
+      if (motorA_geschlossen && motorB_geschlossen) {
+        Serial.println("Alle Klappen wurden geschlossen");
+      } else {
+        Serial.println("Achtung: Reed-Sensoren nicht erreicht!");
+      }
+    }
+
+    // === SCHLITTEN ZWANGS-RÜCKFAHRT ===
+    // Zwingt Schlitten zur Initialposition zu fahren
+    void forceSchlittenToInitialPosition() {
+      Serial.println("Reset: Fahre Schlitten zur Initialposition...");
+      
+      bool initialPositionReached = lichtschrankeAktiv(restmuellSensor); // Initialposition = Restmüllposition
+      
+      if (initialPositionReached) {
+        Serial.println("Schlitten bereits in Initialposition");
+        schlittenInInitialPosition = true;
+        return;
+      }
+      
+      Serial.println("Starte Rückwärtsfahrt zur Initialposition...");
+      
+      unsigned long resetStartTime = millis();
+      const unsigned long RESET_TIMEOUT = 15000;
+ 
+      schlitten_rueckwaerts(); // Motor starten (mit Rampe)
+      
+      // Blockiert, aber ok weil nur für Reset
+      while (!initialPositionReached && (millis() - resetStartTime < RESET_TIMEOUT)) {
+        schlittenRampeUpdate(millis());
+        if (lichtschrankeAktiv(restmuellSensor)) { // Initialposition = Restmüllposition
+          initialPositionReached = true;
+          Serial.println("Initialposition erreicht");
+          }
+        delay(50);
+      }
+      
+      schlitten_stop();
+      
+      if (initialPositionReached) {
+        Serial.println("Schlitten angekommen in Initialposition");
+        schlittenInInitialPosition = true;
+      } else {
+        Serial.println("Achtung: Initialposition nicht erreicht!");
+        schlittenInInitialPosition = false;
+      }
+    }
+
+    // === MANUELLER RESET ===
+    // Reset über HTTP Endpoint /reset (von Wartungssteuerung)
+    void handleManualReset() {
+      Serial.println(" Manueller Reset über /reset Endpoint");
+      
+      if (currentTaskName != "") {
+        taskBeenden();
+      }
+      
+      taskTimeoutError = false;
+      timeoutErrorMessage = "";
+      
+      systemInStartpositionBringen();
+      
+      server.send(200, "application/json", 
+        "{\"status\":\"reset_complete\",\"message\":\"System erfolgreich zur Initialposition zurückgesetzt\"}");
+    }
+
+    // === MÜLL ERKENNEN ===
+    // Prüft Ultraschall-Sensor im Fallschacht
+    void muellErkennen() {
+      // Nicht prüfen wenn System beschäftigt ist
+      if (klappenStatus != KLAPPEN_GESCHLOSSEN && klappenStatus != KLAPPEN_FERTIG) {
+        return;
+      }
+      if (!schlittenInInitialPosition) {
+        return;
+      }
+      
+      // In Intervallen messen
+      if (kalibriert && millis() - letzteMessung >= messIntervall) {
+        letzteMessung = millis();
+        distanz = entfernung(trg1, ech1);
+        Serial.print("Aktueller Wert: "); Serial.println(distanz);
+
+        // Starke Abweichung vom Mittelwert? -> Müll erkannt!
+        if (distanz > 0 && 
+            abs(distanz - mittelwert) > abweichungsschwelle && 
+            !warteAufEndschalter && 
+            !warteAufInitialPosition) {
+          processTrashDetection();  // Verarbeitung starten
+        }
+      }
+    }
+
+    // === MÜLL VERARBEITUNG ===
+    // Wird aufgerufen wenn Müll erkannt wurde
+    void processTrashDetection() {
+      Serial.println("----STARKE ABWEICHUNG ERKANNT----");
+      
+      if (wartungsklappePausiert) {
+        Serial.println("Wartung aktiv - keine Müll-Verarbeitung");
+        return;
+      }
+      
+      // LED weiß für Fotos
+      ledSetzen(CRGB::White);
+      Serial.println("LED Strip: WEISS - Fotos werden aufgenommen...");
+      
+      // Bilder an Raspberry Pi senden
+      bool uploadSuccess = uploadImagesToServer();
+      
+      if (uploadSuccess) {
+        // LED Rot = System ist beschäftigt
+        ledSetzen(CRGB::Red);
+        Serial.println("LED Strip: ROT - Verarbeitet die Prediction");
+        String besteMuellart = analyzeTrashTypeFromServer();
+        
+        // Schlitten starten wenn keine Wartung
+        if (!wartungsklappePausiert) {
+          startSchlittenMovement(besteMuellart);
+        } 
+        else {
+          Serial.println("Wartung aktiv - Schlitten-Start abgebrochen");
+          ledSetzen(CRGB::Black); // LEDS wieder aus wenn doch keine Fahrt gestartet wird
+        }
+      } 
+      else {
+        // Upload fehlgeschlagen - Restmüll als Fallback
+        Serial.println("Fehler beim Upload - verwende RESTMUELL als Fallback");
+        ledSetzen(CRGB::Red);
+        
+        if (!wartungsklappePausiert) {
+          delay(1000);
+          startSchlittenMovement("KUNSTSTOFF");  // Später ändern auf RESTMUELL
+        } 
+        else {
+          Serial.println("Wartung aktiv - Fallback-Schlitten abgebrochen");
+          ledSetzen(CRGB::Black);
+        }
+      }
+    }
+
+  // === BILDER EINZELN AN SERVER SENDEN ===
+
+    // === KI PREDICTION ANALYSIEREN (einzelner Response) ===
+// Parst JSON vom Raspberry Pi, gibt Label+Wahrscheinlichkeit als Struct zurück
+struct PredictionResult {
+  String label;
+  float probability;
+};
+
+PredictionResult parseSinglePrediction(const String& predictionJson) {
+  PredictionResult result = {"", -1.0f};
+
+  if (predictionJson == "") return result;
+
+  StaticJsonDocument<4096> predDoc;
+  DeserializationError error = deserializeJson(predDoc, predictionJson);
+  if (error) {
+    Serial.println("JSON parse error: " + String(error.c_str()));
+    return result;
+  }
+
+  JsonArray imagePredictions = predDoc.as<JsonArray>();
+  if (imagePredictions.isNull()) {
+    Serial.println("Prediction JSON kein Array");
+    return result;
+  }
+
+  for (JsonVariant imageVariant : imagePredictions) {
+    if (!imageVariant.is<JsonArray>()) continue;
+    for (JsonVariant predictionVariant : imageVariant.as<JsonArray>()) {
+      if (!predictionVariant.is<JsonArray>()) continue;
+      JsonArray entry = predictionVariant.as<JsonArray>();
+      if (entry.size() < 2) continue;
+      const char* label = entry[0].as<const char*>();
+      if (!label) continue;
+      float probability = entry[1].as<float>();
+      if (probability > result.probability) {
+        result.probability = probability;
+        result.label = label;
+      }
+    }
+  }
+  // Lösung basiert auf: https://arduinojson.org/v7/tutorial/deserialization/
+  return result;
+}
+
+// Pro Kamera: Bild holen → an Raspberry senden → Prediction empfangen
+// Am Ende wird die Prediction mit der höchsten Einzelwahrscheinlichkeit verwendet
+bool uploadImagesToServer() {
+  if (!ensureDeviceRegistered()) {
+    Serial.println("Skipped Uploads, Gerät nicht registriert");
+    return false;
+  }
+
+  taskStarten("Bilder einzeln uploaden zum Server");
+
+  bool predictionReady = false;
+
+  for (int i = 0; i < 3; i++) {
+
+    // Wartung während Upload? -> Abbrechen
+    if (wartungsklappePausiert) {
+      Serial.println("Wartung aktiv während Kamera-Upload - breche ab");
+      taskBeenden();
+      return false;
+    }
+
+    // --- 1. Bild von Kamera holen ---
+    Serial.println("Hole Bild von Kamera " + String(i + 1) + "...");
+    String b64 = getCameraImage(camIPs[i]);
+    b64.replace("\n", "");
+    b64.replace("\r", "");
+    b64.trim();
+
+    if (b64.isEmpty()) {
+      Serial.println("Kamera " + String(i + 1) + ": FEHLER/LEER - überspringe");
+      continue;
+    }
+    Serial.println("Kamera " + String(i + 1) + ": OK (" + String(b64.length()) + " Zeichen)");
+
+    // Nochmal Wartung prüfen vor dem Upload
+    if (wartungsklappePausiert) {
+      Serial.println("Wartung aktiv vor Upload Kamera " + String(i + 1) + " - breche ab");
+      taskBeenden();
+      return false;
+    }
+
+    // --- 2. JSON-Payload für dieses eine Bild bauen ---
+    String jsonString;
+    jsonString.reserve(b64.length() + 80);
+    jsonString  = "{\"images\":[\"";
+    jsonString += b64;
+    jsonString += "\"],\"device_name\":\"";
+    jsonString += apiDeviceName;
+    jsonString += "\",\"save_images\":true}";
+
+    Serial.printf("Kamera %d Payload: %u Zeichen\n", i + 1, jsonString.length());
+    Serial.println("Payload Start -->");
+    Serial.println(jsonString);
+    Serial.println("<-- Payload Ende");
+
+    // --- 3. An Raspberry Pi senden und Antwort empfangen ---
+    HTTPClient http;
+    http.begin(buildApiUrl("/api/images/predict"));
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("Content-Length", String(jsonString.length()));
+    http.setTimeout(60000);
+    http.useHTTP10(true);
+
+    uint8_t* payloadPtr = const_cast<uint8_t*>(
+      reinterpret_cast<const uint8_t*>(jsonString.c_str())
+    );
+    int httpCode = http.POST(payloadPtr, jsonString.length());
+
+    if (httpCode != 200) {
+      Serial.printf("Kamera %d Upload fehlgeschlagen: HTTP %d\n", i + 1, httpCode);
+      http.end();
+      continue;
+    }
+
+    String responseJson = http.getString();
+    http.end();
+    Serial.println("Kamera " + String(i + 1) + " Prediction empfangen");
+
+    // --- 4. Beste Wahrscheinlichkeit aus diesem Response extrahieren ---
+    PredictionResult result = parseSinglePrediction(responseJson);
+
+    if (result.label != "" && result.probability >= 0.0f) {
+      currentPredictionJson  = "[[[\"";
+      currentPredictionJson += result.label;
+      currentPredictionJson += "\",";
+      currentPredictionJson += String(result.probability, 6);
+      currentPredictionJson += "]]]";
+      Serial.printf("Kamera %d Prediction akzeptiert: %s (%.2f%%)\n",
+                    i + 1, result.label.c_str(), result.probability * 100);
+      predictionReady = true;
+      break; // nur ein Bild pro Upload verarbeiten
+    }
+  }
+
+  taskBeenden();
+
+  if (!predictionReady) {
+    Serial.println("Keine gültige Prediction von keiner Kamera erhalten");
+    currentPredictionJson = "";
+    return false;
+  }
+  return true;
+}
+
+    // === KLAPPEN VERARBEITEN ===
+    // Ruft Klappensteuerung im loop auf bis Klappen fertig sind
+    void klappenVerarbeiten() {
+      if (klappenStatus != KLAPPEN_GESCHLOSSEN && klappenStatus != KLAPPEN_FERTIG) {
+        KlappensteuerungNonBlocking();
+      }
+    }
+
+    // === ULTRASCHALL KALIBRIEREN ===
+    // Misst 3 Sekunden lang Durchschnittswert vom leeren Fallschacht
+    void ultraschallKalibrieren() {
+      Serial.println("Starte Kalibrierung des Ultraschall-Fallschachts...");
+      long summe = 0;
+      int messungen = 0;
+      unsigned long startZeit = millis();
+      
+      // 3 Sekunden messen
+      while (millis() - startZeit < 3000) {
+        distanz = entfernung(trg1, ech1);
+        if (distanz > 0){ 
+          summe += distanz; 
+          messungen++; 
+        }
+        delay(50);
+      }
+      
+      // Durchschnitt berechnen
+      if (messungen > 0) {
+        mittelwert = summe / messungen;
+        kalibriert = true;
+        Serial.print("Durchschnittlicher Wert: "); Serial.println(mittelwert);
+      } else {
+        Serial.println("Fehler: Kalibrierung fehlgeschlagen");
+      }
+    }
+
+    // === DEVICE REGISTRIERUNG ===
+    // Fragt die Geräte-Liste vom Server ab und liefert die ID zu diesem Gerät
+    int fetchExistingDeviceId() {
+      if (WiFi.status() != WL_CONNECTED) return -1;
+
+      HTTPClient http;
+      http.begin(buildApiUrl("/api/devices"));
+      int code = http.GET();
+      if (code != 200) {
+        Serial.printf("Device list failed: HTTP %d\n", code);
+        http.end();
+        return -1;
+      }
+
+      DynamicJsonDocument doc(4096);
+      DeserializationError err = deserializeJson(doc, http.getString());
+      http.end();
+      if (err) {
+        Serial.printf("Device list parse error: %s\n", err.c_str());
+        return -1;
+      }
+
+      for (JsonObject device : doc.as<JsonArray>()) {
+        if (device["name"].as<String>() == apiDeviceName) {
+          return device["id"] | -1;
+        }
+      }
+      return -1;
+  }
+
+  // Erstellt Gerät auf Server und speichert ID
+  bool createDeviceRecord() {
+      if (WiFi.status() != WL_CONNECTED) return false;
+
+      HTTPClient http;
+      http.begin(buildApiUrl("/api/device/register"));
+      http.addHeader("Content-Type", "application/json");
+
+      StaticJsonDocument<512> body;
+      body["device_name"] = apiDeviceName;
+      body["location"] = apiDeviceLocation;
+
+      String payload;
+      serializeJson(body, payload);
+
+      int code = http.POST(payload);
+      if (code == 409) {
+        Serial.println("Device bereits vorhanden");
+        http.end();
+        apiDeviceId = fetchExistingDeviceId(); // Id von bestehendem Gerät holen
+        return apiDeviceId >= 0;
+      }
+      if (code != 201 && code != 200) {
+        Serial.printf("Device Registrierung fehlgeschlagen: HTTP %d\n", code);
+        http.end();
+        return false;
+      }
+
+      DynamicJsonDocument doc(512);
+      String response = http.getString();
+      DeserializationError err = deserializeJson(doc, response);
+      http.end();
+      if (err) {
+        Serial.printf("Device Registrierung Parse Fehler: %s\n", err.c_str());
+        apiDeviceId = fetchExistingDeviceId();  // Id von bestehendem Gerät holen
+        return apiDeviceId >= 0;
+      }
+
+      // ID aus Antwort extrahieren
+      long resolvedId = -1;
+      if (doc.containsKey("device_id")) {
+        resolvedId = doc["device_id"].as<long>();
+      } else if (doc.containsKey("id")) {
+        resolvedId = doc["id"].as<long>();
+      } else if (doc.containsKey("data")) {
+        JsonVariant data = doc["data"];
+        if (data.is<JsonObject>()) {
+          JsonObject obj = data.as<JsonObject>();
+          if (obj.containsKey("device_id")) {
+            resolvedId = obj["device_id"].as<long>();
+          } else if (obj.containsKey("id")) {
+            resolvedId = obj["id"].as<long>();
+          }
+        }
+      }
+      if (resolvedId < 0) {
+        apiDeviceId = fetchExistingDeviceId();
+      } else {
+        apiDeviceId = static_cast<int>(resolvedId);
+      }
+      return apiDeviceId >= 0;
+  }
+
+  // Stellt sicher, dass apiDeviceId gesetzt ist (entweder wiederverwenden oder neu erstellen)
+  bool ensureDeviceRegistered() {
+      if (apiDeviceId >= 0) return true;
+      apiDeviceId = fetchExistingDeviceId();
+      if (apiDeviceId >= 0) {
+          Serial.printf("Device %s gibt es schon, verwende id %d\n", apiDeviceName, apiDeviceId);
+          return true;
+      }
+      if (createDeviceRecord()) {
+          Serial.printf("Device %s erstellt id %d\n", apiDeviceName, apiDeviceId);
+          return true;
+      }
+      Serial.println("Device registrierung fehlgeschlagen");
+      return false;
+  }
+
+  // Füllstände an Server senden
+  void sendFillLevelsToApi() {
+    if (apiDeviceId < 0 || WiFi.status() != WL_CONNECTED) {
+      Serial.println("Füllstand Update geskipped - Gerät nicht registriert oder kein WiFi");
+      return;
+    }
+
+    HTTPClient http;
+    http.begin(buildApiUrl("/api/fill_level"));
+    http.addHeader("Content-Type", "application/json");
+
+    StaticJsonDocument<256> body;
+    body["id"] = 1; // Füllstand ID bleibt gleich
+    body["device_id"] = apiDeviceId;
+    body["fill_level_plastic"] = constrain(kunststoffHoehe / 70.0f, 0.0f, 1.0f); // 70cm = voll
+    body["fill_level_paper"] = constrain(papiermuellHoehe / 70.0f, 0.0f, 1.0f);
+    body["fill_level_waste"] = constrain(restmuellHoehe / 70.0f, 0.0f, 1.0f);
+
+    String payload;
+    serializeJson(body, payload);
+    Serial.print(payload);
+
+    int code = http.POST(payload);
+    if (code == 200 || code == 201) {
+      Serial.println("Füllstände erfolgreich aktualisiert");
+    } else {
+      Serial.printf("Fehler beim Aktualisieren der Füllstände: HTTP %d\n", code);
+    }
+    http.end();
+  }
+
+// Der gesamte Code wurde mit Claude Sonnet 4.5 erweiternd kommentiert und formatiert.
