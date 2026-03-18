@@ -1,3 +1,10 @@
+"""LinkedList = LinkedList()
+für mature
+observer
+facrory
+proxy
+straegy
+command"""
 """Programmiere mit Python, die einfach verkettete Liste als Datenstruktur.
 I Datenstruktur als Objekt instanzierbar
 I Ganzahl-werte als Werte der Datenstruktur
@@ -9,22 +16,21 @@ I iterator protokoll implementieren
 I PS: so wurde mans in JAVA machen ¨
 I https://javabeginners.de/Sammlungen_und_Listen/Einfach_
 verkettete_Liste.php
-I ABGABE bis sp¨atestens: 2026.03.18 und GIT!
-"""
-
+I ABGABE bis sp¨atestens: 2026.03.18 und GIT!"""
 
 import random
 
 class ListElement:
-    def __init__(self, value: int):
+    def __init__(self, value):
         self.value = value
         self.next = None
 
 class LinkedList:
     def __init__(self):
         self.head = None
+        self._iter_node = None
 
-    def hinten_hinzufuegen(self, value: int):
+    def hinten_hinzufuegen(self, value):
         new_elem = ListElement(value)
         if self.head is None:
             self.head = new_elem
@@ -45,18 +51,26 @@ class LinkedList:
         return count
 
     def __iter__(self):
-        current = self.head
-        while current is not None:
-            yield current.value
-            current = current.next
+        self._iter_node = self.head
+        return self
+
+
+    def __next__(self):
+        if self._iter_node is None:
+            raise StopIteration
+        value = self._iter_node.value
+        self._iter_node = self._iter_node.next
+        return value
+
 
     def __str__(self):
-        string =""
-        string += "["
-        for value in self:
-            string += str(value)
-            string += ","
-        string = string[:-1]
+        string = "["
+        current = self.head
+        while current is not None:
+            string += str(current.value)
+            if current.next is not None:
+                string += ", "
+            current = current.next
         string += "]"
         return string
 
@@ -71,6 +85,15 @@ def main():
 
     print("Länge der Liste:", len(liste))
 
+    print("Iterieren über die Liste mit next():")
+    iterator = iter(liste)
+    while True:
+        try:
+            value = next(iterator)
+            print(value, end=" ")
+        except StopIteration:
+            break
+    print()
 
 if __name__ == "__main__":
     main()
